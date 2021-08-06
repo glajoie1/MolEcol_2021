@@ -1,0 +1,833 @@
+---
+title: "Plant-bacteria associations are phylogenetically structured in the phyllosphere"
+author: "Geneviève Lajoie"
+output: html_notebook
+---
+
+## Libraries
+
+Loading libraries.
+
+```{r Libraries, include=FALSE}
+library(reshape2)
+library(vegan)
+library(ggplot2)
+library(ape)
+library(phyr)
+library(heatmap3)
+library(ggtree)
+library(adephylo)
+library(phylosignal)
+library(phylobase)
+library(phylofactor)
+library(phytools)
+library(doParallel)
+library(plyr)
+library(phyloseq)
+library(dendextend)
+```
+
+<br />
+
+## Data import and formatting
+Importing environment with formatted datatables.
+
+General dataset
+```{r}
+load('~/Data_analysis.RData')
+
+# Description of the objects therein:
+
+# asvt : Bacterial phylogeny of the 232 most abundant ASVs
+# bac.10K, bac.10K.a : Taxonomic and functional annotations based on the metagenomic sequencing
+# comb.tree : Host phylogeny
+# kegg.cat : Functional classification of KEGG functional genes
+# metadata : Metadata for each of 24 bacterial communities and hosts
+# ps.new : ASV table and taxonomic annotations based on 16S sequencing
+
+```
+
+Formatting bacterial phylogeny
+```{r}
+# Make ultrametric
+asvt2<-force.ultrametric(asvt)
+# Make dichotomous (for downstream analyses)
+asvt2<-multi2di(asvt2)
+```
+
+## Descriptive statistics
+
+```{r}
+# A) Functional composition: Average across samples
+bac.10K.m<-reshape2::melt(as.matrix(bac.10K.a))
+
+# Merge with kegg.cat
+bac.10K.cat<-merge(bac.10K.m, kegg.cat, by.x='Var2', by.y='Kegg', all.x=T)
+colnames(bac.10K.cat)[1:3]<-c('Kegg','samp','Freq')
+
+# Calculate abundance of each C cat for each sample
+sam_sum<-aggregate(Freq~samp+C+B+A, bac.10K.cat, sum)
+
+# Mean across samples
+sam_mean<-aggregate(Freq~C+B+A, sam_sum, mean)
+
+# Creating datafile for plotting
+samA<-aggregate(Freq~A, sam_mean, FUN=function(x) sum(x)/sum(sam_mean$Freq))
+samA$cat<-'A'
+
+samB<-aggregate(Freq~B, sam_mean, FUN=function(x) sum(x)/sum(sam_mean$Freq))
+samB$cat<-'B'
+
+samC<-aggregate(Freq~C, sam_mean, FUN=function(x) sum(x)/sum(sam_mean$Freq))
+samC$cat<-'C'
+colnames(samA)[1]<-colnames(samB)[1]<-colnames(samC)[1]<-'Fun'
+
+# Adding color cat
+samA$A<-samA$Fun
+samB$A<-bac.10K.cat$A[match(samB$Fun,bac.10K.cat$B)]
+samC$A<-bac.10K.cat$A[match(samC$Fun,bac.10K.cat$C)]
+
+meta.bind<-rbind(samA,samB,samC)
+
+# Transform data for plotting
+comp.bind <- ddply(meta.bind, .(cat),
+                   transform, init = 1- cumsum(Freq) + (0.5 * Freq))
+comp.bind <- ddply(comp.bind, .(cat, A),
+                   transform, pos = rev(Freq))  #1- cumsum(Freq) + (0.5 * Freq)
+comp.bind <- ddply(comp.bind, .(cat),
+                   transform, finpos = 1- cumsum(pos) + (0.5 * pos))  #1- cumsum(Freq) + (0.5 * Freq)
+comp.bind <- ddply(comp.bind, .(cat, A),
+                   transform, fin = rev(finpos))
+
+# Samples aggregated / within or across treatments 
+# CatC are not aligning with the Bs. Potentially just remove catC: not very informative.
+ggplot(data=comp.bind, aes(x=cat, y=Freq, fill=A))+
+  geom_bar(color='black', stat='identity', group="Fun", position='stack') +                    
+  geom_text(data=subset(comp.bind, Freq > 0.02), aes(x=cat, y=fin, label=Fun), size=3) +
+  theme_bw()+
+  theme(legend.position="none")+
+  labs(x='Functional categories', y='Relative abundance')
+
+# B) Taxonomic composition: Average across samples
+
+## 16S data
+# Append OTU table with taxo table
+otu16<-as.data.frame(t(ps.new@otu_table@.Data))
+# Sum of each ASV freq across samples
+otu.sum<-as.data.frame(rowSums(otu16))
+
+# Append (average across samples)
+taxo16<-as.data.frame(ps.new@tax_table@.Data)
+taxo16$phylum[which(is.na(taxo16$phylum)==T)]<-'Unidentified phylum'
+otu.taxo16<-merge(otu.sum,taxo16, by='row.names')
+rownames(otu.taxo16)<-otu.taxo16$Row.names
+otu.taxo16<-otu.taxo16[,-1]
+colnames(otu.taxo16)[1]<-'Freq'
+
+# Aggregate by phylum
+phylo_sum<-aggregate(Freq~phylum, otu.taxo16, sum)
+# Add unidentified bacteria
+phylo_sum$Freq<-as.numeric(phylo_sum$Freq)
+# Relative abundance
+phylo_sum$Freq<-phylo_sum$Freq/sum(phylo_sum$Freq)
+
+# Plot
+ggplot(phylo_sum, aes(x=1, y=Freq, fill=phylum))+
+  geom_bar(color='black', stat='identity',position='stack')+
+  theme_bw()+
+  labs(x='Host species', y='Relative abundance')
+
+# Append (by sample)
+otu16.m<-reshape2::melt(as.matrix(otu16))
+otu16.m<-merge(otu16.m,taxo16, by.x='Var1',by.y='row.names', all.x=T)
+
+# Aggregate across samples
+otu16.samp<-aggregate(value~Var2+phylum, otu16.m, sum)
+otu16.cast<-acast(otu16.samp, Var2~phylum, value.var='value')
+otu16.cast<-decostand(otu16.cast, 'total')
+otu16.samp<-reshape2::melt(otu16.cast)
+otu16.samp$Var1<-as.character(otu16.samp$Var1)
+otu16.samp$Var1<-metadata$Species[match(otu16.samp$Var1,metadata$sample_name)]
+
+# Plot
+ggplot(otu16.samp, aes(x=Var1, y=value, fill=Var2))+
+  geom_bar(color='black', stat='identity',position='stack')+
+  theme_bw()+
+  theme(axis.text.x=element_text(angle=90))+
+  labs(x='Host species', y='Relative abundance')
+
+## Metagenomic data
+bac.taxo<-bac.10K
+bac.taxo$X.5[which(is.na(bac.taxo$X.5)==T)]<-'Unidentified phylum'
+bac.taxo$X.5[which(bac.taxo$X.5=='')]<-'Unidentified phylum'
+
+# By sample
+metax<-aggregate(seq1~sample_name+X.5, bac.taxo, length)
+# Relative abundance
+metax.cast<-acast(metax, sample_name~X.5, value.var='seq1', fill=0)
+metax.cast<-decostand(metax.cast, 'total')
+metax<-reshape2::melt(metax.cast)
+metax$Var1<-as.character(metax$Var1)
+metax$Var1<-metadata$Species[match(metax$Var1,metadata$sample_name)]
+
+# Plot
+ggplot(metax, aes(x=Var1, y=value, fill=Var2))+
+  geom_bar(color='black', stat='identity',position='stack')+
+  theme_bw()+
+  theme(axis.text.x=element_text(angle=90))
+
+# Across samples
+metax.all<-aggregate(value~Var2, metax, mean)
+
+# Plot
+ggplot(metax.all, aes(x=1, y=value, fill=Var2))+
+  geom_bar(color='black', stat='identity',position='stack')
+
+## Comparing taxonomic composition among 16S and metagenomic samples
+# Remove unidentified samples and recompute relative abundances
+metax.c<-metax.cast[,-which(colnames(metax.cast)=='Unidentified phylum')]
+metax.c<-decostand(metax.c, 'total')
+otu16.c<-otu16.cast[,-which(colnames(otu16.cast)=='Unidentified phylum')]
+otu16.c<-decostand(otu16.c, 'total')
+
+# Meta
+meta.dist<-vegdist(metax.c)
+met.pcoa<-pcoa(meta.dist)
+# First dimensions
+met.ps<-met.pcoa$vectors[,c(1:5)]
+
+# 16S
+otu.dist<-vegdist(otu16.c)
+otu.pcoa<-pcoa(otu.dist)
+# First dimensions
+otu.ps<-otu.pcoa$vectors[,c(1:5)]
+
+# Procrustes test
+proct<-procrustes(met.pcoa$vectors[,1:12], otu.pcoa$vectors[,1:12], symmetric=T)
+proct
+
+funtest<-protest(X=met.pcoa$vectors[,1:12], Y=otu.pcoa$vectors[,1:12], scores = "sites", permutations = 999)
+m12<-round(funtest$ss, digits=2)
+corr<-round(funtest$t0, digits=2)
+funtest
+
+```
+
+## Phylogenetic associations between plants and bacteria
+
+Bacterial community composition among plant samples : formatting datasets
+```{r}
+# Prepare dataset (freq, sp, site)
+dat<-as.data.frame(ps.new@otu_table)
+
+# Replace site names by host species names
+rownames(dat)<-metadata$Species[match(rownames(dat),metadata$sample_name)]
+dat<-reshape2::melt(as.matrix(dat))
+colnames(dat)<-c('site','sp','freq')
+
+# Remove ASVs with <100 occurrence
+dat<-dat[-which(dat$freq==0),] # Need to remove 0s
+datagg<-aggregate(freq~sp, dat, sum)
+dat2<-dat[-which(dat$sp%in%datagg[which(datagg$freq%in%c(1:99)),'sp']),] # 232 ASVs left (asvt phylogeny comprises these ASVs)
+dat2$sp<-droplevels(dat2$sp)
+
+# Proportion of the total ASV records that these ASV represent
+sum(ps.new@otu_table@.Data[,which(colnames(ps.new@otu_table@.Data)%in%asvt2$tip.label)])/sum(ps.new@otu_table) # 77%
+
+# Correct for unequal sample sizes
+gg<-as.data.frame(acast(dat2, site~sp, value.var = 'freq', fill=0))
+sort(rowSums(gg))
+nef<-as.data.frame(rrarefy(gg, 3500)) #
+dat3<-reshape2::melt(as.matrix(nef))
+colnames(dat3)<-colnames(dat2)
+
+# Matrix
+dat.mat<-acast(dat3, site~sp, value.var='freq')
+dat.hel<-decostand(dat.mat, 'hellinger')
+```
+
+Phylogenetic interaction model
+```{r}
+### Compute cophenetic distances for each phylogeny
+
+## Bacterial phylogeny
+newmic<-asvt2
+# Variance cov matrix
+VphyMic<-vcv(newmic)
+VphyMic <- VphyMic[order(newmic$tip.label),order(newmic$tip.label)]
+
+# Standardize (from pglmm function)
+VphyMic <- VphyMic/max(VphyMic)
+VphyMic <- VphyMic/exp(determinant(VphyMic)$modulus[1]/nrow(VphyMic))
+det(VphyMic)
+
+## Plant phylogeny
+# Keep only species for which we have metagenomic data
+plt.phy<-comb.tree
+plt.phy<-drop.tip(plt.phy, setdiff(plt.phy$tip.label,rownames(dat.mat)))
+plt.phy<-force.ultrametric(plt.phy)
+
+VphyPlnt<-vcv(plt.phy)
+VphyPlnt <- VphyPlnt[order(plt.phy$tip.label),order(plt.phy$tip.label)]
+
+# Standardize (from pglmm function)
+# Make it positive definite for chol decomposition to work
+VphyPlnt <- VphyPlnt/max(VphyPlnt)
+VphyPlnt <- VphyPlnt/exp(determinant(VphyPlnt)$modulus[1]/nrow(VphyPlnt))
+det(VphyPlnt)
+
+# General model of the form:
+
+zf6.100 <- pglmm(log(freq+1) ~ 1 + (1|sp__) + (1|site__) + (1|sp__@site) + 
+                  (1|sp@site__) + (1|sp__@site__), 
+                data = dat3, family = "gaussian", # 
+                cov_ranef = list(sp = VphyMic, site = VphyPlnt), 
+                REML = TRUE, verbose = TRUE, s2.init = .1, maxit=100)
+
+```
+
+Likelihood ratio tests
+```{r}
+# Basic model
+# Use summary function for variance components
+
+za.100 <- glm(log(freq+1) ~ 1 , 
+                data = dat3, family = "gaussian", # should be gaussian, not binomial
+                maxit=100)
+
+zal<-logLik(za.100)
+
+# Random effect of species
+zb.100 <- pglmm(log(freq+1) ~ 1 + (1|sp), 
+                data = dat3, family = "gaussian", REML = TRUE, verbose = TRUE,# should be gaussian, not binomial
+                maxit=100)
+
+zbl<-zb.100$logLik
+
+pvalue <- pchisq(2*(zbl - zal), df = 1, lower.tail = F)
+pvalue
+
+# Random effect of site
+zc.100 <- pglmm(log(freq+1) ~ 1 + (1|sp) + (1|site), 
+                 data = dat3, family = "gaussian", REML = TRUE, verbose = TRUE, # should be gaussian, not binomial
+                 maxit=100)
+
+zcl<-zc.100$logLik
+
+pvalue <- pchisq(2*(zcl - zbl), df = 1, lower.tail = F)
+pvalue
+
+# Random effect of species phylogeny
+zd.100 <- pglmm(log(freq+1) ~ 1 + (1|sp__) + (1|site), 
+                data = dat3, family = "gaussian", cov_ranef = list(sp = VphyMic), REML = TRUE, verbose = TRUE, # should be gaussian, not binomial
+                maxit=100)
+
+zdl<-zd.100$logLik
+
+pvalue <- pchisq(2*(zdl - zcl), df = 1, lower.tail = F)
+pvalue
+
+# Random effect of species phylogeny* site
+
+ze.100 <- pglmm(log(freq+1) ~ 1 + (1|sp__) + (1|site) + (1|sp__@site), 
+                data = dat3, family = "gaussian", cov_ranef = list(sp = VphyMic), REML = TRUE, verbose = TRUE, 
+                s2.init = c(zd.100$ss, 0.01)^2,# should be gaussian, not binomial
+                maxit=100)
+
+zel<-ze.100$logLik
+
+pvalue <- pchisq(2*(zel - zdl), df = 1, lower.tail = F)
+pvalue
+
+# Random effect of site phylogeny
+zf.100 <- pglmm(log(freq+1) ~ 1 + (1|sp) + (1|site__), 
+                data = dat3, family = "gaussian", cov_ranef = list(site = VphyPlnt), REML = TRUE, verbose = TRUE, # should be gaussian, not binomial
+                maxit=100)
+
+zfl<-zf.100$logLik
+
+pvalue <- pchisq(2*(zfl - zcl), df = 1, lower.tail = F)
+pvalue
+
+# Random effect of site phylogeny* species
+zg.100 <- pglmm(log(freq+1) ~ 1 + (1|sp) + (1|site__) + (1|site__@sp), 
+                data = dat3, family = "gaussian", cov_ranef = list(site = VphyPlnt), REML = TRUE, verbose = TRUE, # should be gaussian, not binomial
+                s2.init = c(zf.100$ss, 0.01)^2,
+                maxit=100)
+
+zgl<-zg.100$logLik
+
+pvalue <- pchisq(2*(zgl - zfl), df = 1, lower.tail = F)
+pvalue
+
+# Random effect of site phylogeny & species phylogeny
+
+zr6.100 <- pglmm(log(freq+1) ~ 1 + (1|sp__) + (1|site__) + (1|sp__@site) + # Can use any trait as sp*X instead of the intercept
+                   (1|sp@site__), 
+                 data = dat3, family = "gaussian", # should be gaussian, not binomial
+                 cov_ranef = list(sp = VphyMic, site = VphyPlnt), 
+                 REML = TRUE, verbose = TRUE, s2.init = .1, maxit=100)
+
+zf6.100 <- pglmm(log(freq+1) ~ 1 + (1|sp__) + (1|site__) + (1|sp__@site) + # Can use any trait as sp*X instead of the intercept
+                   (1|sp@site__) + (1|sp__@site__), 
+                 data = dat3, family = "gaussian", # should be gaussian, not binomial
+                 cov_ranef = list(sp = VphyMic, site = VphyPlnt), 
+                 REML = TRUE, verbose = TRUE, s2.init = c(zr6.100$ss, 0.01)^2, maxit=100)
+
+pvalue <- pchisq(2*(zf6.100$logLik - zr6.100$logLik), df = 1, lower.tail = F)
+pvalue
+
+```
+
+Plot associations
+```{r}
+# Heatmap 
+# https://stackoverflow.com/questions/15153202/how-to-create-a-heatmap-with-a-fixed-external-hierarchical-cluster
+mata<-acast(dat3, site~sp, value.var = 'freq')
+mata<-log(mata+1)
+
+# Prepare association matrix
+dat.plot<-dat3[-which(dat3$freq==0),]
+dat.plot<-dat.plot[,c(2,1,3)]
+match(as.character(unique(dat.plot$sp)),newmic$tip.label)
+obj<-cophylo(asvt2, plt.phy, dat.plot[,c(1:2)])
+
+# Ordering using basic co-phylogeny default (above)
+pp<-as.dendrogram(force.ultrametric(obj[[1]][[2]], method='extend'))
+mm<-as.dendrogram(obj[[1]][[1]])
+mata<-mata[match(labels(pp),rownames(mata)),match(labels(mm),colnames(mata))]
+
+# Use side colors to indicate taxonomy
+# Subclass (4)
+cols<-cbind(c('#99FF33','#33FF00','#006600','#003300'),c(1:4))
+host.col.sc<-as.numeric(as.factor(metadata$Subclass[match(rownames(mata),metadata$Species)]))
+host.col.sc<-cols[match(host.col.sc,cols[,2]),1]
+# Order(7)
+cols<-cbind(c('#99FF33','#669900','#006600','#CCFF00','#003300','#999933','#66CC66'),c(1:7))
+host.col.ord<-as.numeric(as.factor(metadata$Order[match(rownames(mata),metadata$Species)]))
+host.col.ord<-cols[match(host.col.ord,cols[,2]),1]
+
+# Microbial taxonomy
+cols2<-cbind(c("#CCCCCC","#000033","#000099","#0033FF","#0099FF","#FF99FF","#CC66FF","#99CCFF","#6666CC"),c(0:8))
+cols3<-cbind(c("#CCCCCC","#73B761","#4A588A","#ECC846","#CD4C46","#71AFE2","#8D6FD1","#EE9E64","#95DABB"),c(0:8))
+phyl<-as.data.frame(ps.new@tax_table@.Data)
+# Identify NAs if possible
+mtt<-phyl[match(colnames(mata),rownames(phyl)),]
+mtt[which(is.na(mtt$class)==T),] # 
+phyl$class[which(rownames(phyl)=='ASV10863')]<-phyl$class[which(rownames(phyl)=='ASV10154')]
+
+# Match colors
+mic.col.c<-as.numeric(as.factor(phyl$class[match(colnames(mata),rownames(phyl))]))
+mic.col.c[which(is.na(mic.col.c)==T)]<-0
+mic.col.c<-cols2[match(mic.col.c,as.numeric(cols2[,2])),1]
+
+# Plot
+heatmap3(mata, Rowv=pp, Colv=mm, col = colorRampPalette(c("ivory", "orange2", "firebrick3"))(10), scale='none', RowSideColors=host.col.ord, ColSideColors = mic.col.c, cexRow = 0.9)
+
+```
+
+## Phylogenetic factorization
+
+```{r}
+### Phylofactorization to identify bacterial clades that are associated with host taxonomy
+# Check tutorials: https://github.com/reptalex/phylofactor
+# https://dfzljdn9uc3pi.cloudfront.net/2017/2969/1/PhyloFactor_tutorial.html
+# Especially for visualization
+
+# OTU Phylogenetic tree
+OTUTable<-dat.mat[,match(newmic$tip.label, colnames(dat.mat))]
+
+# Plant trait
+plt.taxo<-metadata[which(metadata$Species%in%rownames(OTUTable)),c('Order','Family','Genus','Species','Subclass')]
+plt.taxo<-plt.taxo[match(rownames(OTUTable),plt.taxo$Species),]
+
+OTUTable<-t(OTUTable)
+
+# OTU Taxonomy
+taxonomy<-as.data.frame(ps.new@tax_table@.Data)
+taxonomy<-taxonomy[which(rownames(taxonomy)%in%rownames(OTUTable)),]
+taxo<-data.frame(asv=rownames(taxonomy),taxo=paste(taxonomy$domain, taxonomy$phylum, taxonomy$class, taxonomy$order, taxonomy$family, taxonomy$genus, sep=';'))
+taxo<-taxo[match(newmic$tip.label, taxo$asv),]
+
+# Phylofactorization 
+# Check at fraction explained variance
+
+PF<- PhyloFactor(OTUTable,asvt2,plt.taxo$Order,nfactors=10) # 
+summary(PF)
+PF$models[[1]]
+
+smry <- pf.summary(PF,taxo,factor=c(i))# i=1
+# names(smry)
+pf.tidy(smry)
+
+# Visualization
+# https://www.color-hex.com/color/268e66
+gg <- pf.tree(PF, method='factors', factors=1:10, top.layer=F, colors=c("#26828e","#8e2682","#828e26","#264e8e","#268e66","#8e3226","#8e6626","#6dcd59","#cd596d","yellow"))
+gg
+
+
+### Phylofactorization to identify plant clades that are associated with bacterial taxonomy
+
+# Abundance table
+PLTTable<-as.data.frame(t(OTUTable))
+
+# Phylogeny
+plt.phy
+PLTTable<-PLTTable[match(plt.phy$tip.label,rownames(PLTTable)),]
+
+# Bacterial taxonomy
+taxobac<-taxonomy
+taxobac<-taxobac[match(colnames(PLTTable),rownames(taxobac)),]
+
+# Issues with NA factor level, so replace with unknown for now
+taxobac<-apply(taxobac, 2, as.character)
+taxobac[is.na(taxobac)==T]<-'UNK'
+taxobac<-as.data.table(taxobac)
+rownames(taxobac)<-rownames(taxonomy)
+
+# Plant taxonomy
+taxoplt<-plt.taxo
+taxoplt<-data.frame(plt=taxoplt$Species, taxo=paste(taxoplt$Order,taxoplt$Family,taxoplt$Genus, taxoplt$Species, sep=';'))
+taxoplt<-taxoplt[match(plt.phy$tip.label,taxoplt$plt),]
+
+table(taxobac$phylum)
+
+# Phylofactorization
+PF2<- PhyloFactor(PLTTable,plt.phy,taxobac$family, nfactors=10) summary(PF2)
+
+smry <- pf.summary(PF2,taxoplt,factor=4)
+#names(smry)
+pf.tidy(smry)
+
+# Visualization
+# https://www.color-hex.com/color/268e66
+gg2 <- pf.tree(PF2, method='factors', factors=1:10, top.layer=F, colors=c("#26828e","#8e2682","#828e26","#264e8e","#268e66","#8e3226","#8e6626","#6dcd59","#cd596d","yellow"))
+gg2
+
+```
+
+## Principal coordinates analysis
+
+Ordination of ASV composition - UNIFRAC
+```{r}
+# Find plant traits and bacterial traits most linked with bacterial phylogenetic structure
+## Calculate UNIFRAC
+physeq2 = phyloseq(otu_table(decostand(dat.mat,'hellinger'),taxa_are_rows=F), asvt2)
+
+registerDoParallel(cores=10)
+dat.dist.uni<-UniFrac(physeq2, weighted=F, normalized=TRUE, parallel=TRUE, fast=TRUE)
+
+## Pcoa for envfit
+pcoa.dat.uni <- cmdscale(dat.dist.uni, k=nrow(dat.hel)-1, eig=T)
+# Pcoa to get at % variance
+# pcoa.dat2 <- pcoa(dat.dist.uni, correction="lingoes")
+# pcoa.dat2$values
+
+```
+
+Test of an effect of host taxonomy
+```{r}
+# Test for an effect of the structure
+plot.str<-data.frame(metadata[,which(colnames(metadata)%in%c('Species','Genus','Family','Order','Subclass'))])
+plot.str<-plot.str[match(labels(dat.dist.uni), plot.str$Species),]
+    
+# Model
+perm.str<-adonis2(dat.dist.uni ~ Subclass + Order:Subclass , data = plot.str) # Cannot split it much more since we don't have levels below order for most orders
+
+# Reporting model
+perm.str
+```
+
+Plotting ordination
+Use K1 and K2
+```{r}
+# Fit functional traits in there
+rownames(bac.10K.a)<-metadata$Species[match(rownames(bac.10K.a),metadata$sample_name)]
+bac.10K.o<-bac.10K.a[match(rownames(dat.mat),rownames(bac.10K.a)),]
+efitC1<-envfit(pcoa.dat.uni, decostand(bac.10K.o, 'standardize'), choices=c(1)) 
+efitC2<-envfit(pcoa.dat.uni, decostand(bac.10K.o,'standardize'), choices=c(2)) 
+
+# # Which are most highly correlated
+k1.names<-names(sort(efitC1$vectors$r[efitC1$vectors$pvals<0.05],decreasing=T))[1:10] # Can vary the number of variables here
+k2.names<-names(sort(efitC2$vectors$r[efitC2$vectors$pvals<0.05],decreasing=T))[1:10]
+# 
+knames<-unique(c(na.omit(k1.names),na.omit(k2.names)))
+
+# New fit
+efitC<-envfit(pcoa.dat.uni, decostand(bac.10K.o[,which(colnames(bac.10K.o)%in%c(knames))],'standardize'), choices=c(1,2)) # ,k2.names
+
+# Fit plant traits in here
+# Transform plant traits
+plt.trt.sd<-decostand(metadata[,c('SLA','P','Ca','Wood.dens')], 'standardize')
+rownames(plt.trt.sd)<-metadata$Species
+plt.trt.sd<-plt.trt.sd[match(rownames(dat.mat),rownames(plt.trt.sd)),]
+
+efitP<-envfit(pcoa.dat.uni, plt.trt.sd, choices=c(1,2))
+
+# Fit bacterial taxonomy
+dat.mat.m<-melt(as.matrix(dat.mat))
+dat.mat.m<-merge(dat.mat.m, taxonomy, by.x='Var2', by.y='row.names', all.x=T)
+dat.tax<-aggregate(value~class+Var1, dat.mat.m, sum)
+dat.tax<-acast(dat.tax, Var1~class, value.var="value")
+dat.tax<-dat.tax[match(rownames(dat.mat),rownames(dat.tax)),]
+dat.tax<-decostand(dat.tax, 'standardize')
+
+efitT<-envfit(pcoa.dat.uni, dat.tax, choices=c(1,2))
+
+# Plotting results
+ordiplot(pcoa.dat.uni, type='text', display='site', choices=c(1,2), cex=0.8) # , type='text', display='site'
+ordispider(pcoa.dat.uni, choices=c(1,2),groups, display = "sites", kind = "se", lty=c(1), conf = 0.95, alpha = 0.05, lwd = 1.5, label=TRUE)
+
+ordiplot(pcoa.dat.uni, type='text', display='site', choices=c(1,2)) # , type='text', display='site'
+plot(efitC, col="blue", cex = 0.9)
+plot(efitP, col="red", cex = 0.9)
+
+ordiplot(pcoa.dat.uni, type='text', display='site', choices=c(1,2)) # , type='text', display='site'
+plot(efitT, col="blue", cex = 0.9)
+
+```
+
+
+## Phylogenetic Principal Component Analysis
+
+```{r}
+# PPCA to find the bacterial functions most associated with plant phylogenetic structure
+
+# Build phylo4d object
+trt.strip<-bac.10K.o
+trt.strip<-trt.strip[match(plt.phy$tip.label, rownames(trt.strip)),]
+colnames(trt.strip)<-gsub("\\s\\[.*", '', colnames(trt.strip))
+colnames(trt.strip)<-gsub("\\s", "_", colnames(trt.strip))
+colnames(trt.strip)<-gsub("-", "_", colnames(trt.strip))
+colnames(trt.strip)<-gsub(",", "_", colnames(trt.strip))
+plt.dat <- phylo4d(plt.phy, tip.data=trt.strip)
+
+# PPCA
+map.ppca <- ppca(plt.dat, center=TRUE, scale=TRUE, scannf=FALSE, nfposi=5, method="Abouheif") 
+plot(map.ppca)
+
+# Explore representations
+
+## Dim 1
+a <- map.ppca$c1[,1] # loadings on PC 1
+names(a) <- row.names(map.ppca$c1)
+highContrib <- a[a< quantile(a,0.01) | a>quantile(a,0.990)]
+
+kk<-kegg.cat[which(kegg.cat$Kegg%in%names(highContrib)),]
+kk<-merge(kk, as.data.frame(highContrib), by.x='Kegg', by.y='row.names', all.x=T)
+kk$sign<-'Pos'
+kk$sign[which(kk$highContrib<0)]<-'Neg'
+kk<-kk[order(kk$sign,kk$B),]
+
+kk1<-kk
+
+no<-kk$Kegg[!duplicated(kk$Kegg)]
+
+af<-trt.strip[match(rownames(map.ppca$li),rownames(trt.strip)), names(highContrib)]
+af<-af[,match(no, colnames(af))]
+
+# Add plant trait data
+pt<-plt.trt.sd[match(rownames(af),rownames(plt.trt.sd)),]
+
+datSel <- cbind.data.frame(af, map.ppca$ls[,1], pt)
+
+temp <- phylo4d(plt.phy, datSel)
+table.phylo4d(temp, ratio.tree=1/5, cex.label=0.7, cex.symbol=0.6, show.node.label=F, box=F)
+
+
+## Dim 2
+a <- map.ppca$c1[,2]
+names(a) <- row.names(map.ppca$c1)
+highContrib <- a[a< quantile(a,0.01) | a>quantile(a,0.990)]
+
+
+kk<-kegg.cat[which(kegg.cat$Kegg%in%names(highContrib)),]
+kk<-merge(kk, as.data.frame(highContrib), by.x='Kegg', by.y='row.names', all.x=T)
+kk$sign<-'Pos'
+kk$sign[which(kk$highContrib<0)]<-'Neg'
+kk<-kk[order(kk$sign,kk$B),]
+
+kk2<-kk
+
+no<-kk$Kegg[!duplicated(kk$Kegg)]
+
+af<-trt.strip[match(rownames(map.ppca$li),rownames(trt.strip)), names(highContrib)]
+af<-af[,match(no, colnames(af))]
+
+# Add plant trait data
+pt<-plt.trt.sd[match(rownames(af),rownames(plt.trt.sd)),]
+
+datSel <- cbind.data.frame(af, map.ppca$ls[,2], pt)
+
+temp <- phylo4d(plt.phy, datSel)
+table.phylo4d(temp, ratio.tree=1/5, cex.label=0.7, cex.symbol=0.6, show.node.label=F, box=F)
+
+```
+
+## Structure of host-bacteria trait associations
+
+### Signal of plant traits in microbial phylogeny
+
+```{r}
+# A) Visualizing plant trait average per ASV
+
+# Plant functional distance among bacteria
+mica<-as.matrix(decostand(t(dat.mat), 'total'))
+
+# Check sample order
+plt.trt<-metadata[,c('SLA','P','Ca','Wood.dens')]
+rownames(plt.trt)<-metadata$Species
+plt.trt<-plt.trt[match(colnames(mica),rownames(plt.trt)),]
+
+# Bind it with the means
+resum<-mica %*% as.matrix(plt.trt)
+resum<-resum[match(asvt2$tip.label, rownames(resum)),]
+
+# Plot these values onto a bacterial phylogeny
+X=as.matrix(resum)
+rownames(X)<-resum$SampleID
+
+circ <- ggtree::ggtree(asvt2, layout = "circular")
+df<-data.frame(decostand(X, 'standardize'))
+
+p1 <- gheatmap(circ, df, offset=0, width=.5, colnames_angle=95, colnames_offset_y = -3) +
+    scale_y_continuous(expand = c(0.02,0)) +
+    scale_fill_viridis_c(option="B", name="Plant traits")
+
+
+# Boxplots
+
+# Examine differences among classes and among families
+dfm<-df
+dfm$asv<-rownames(dfm)
+dfm<-melt(dfm)
+colnames(dfm)<-c('asv','trt','value')
+dfm<-merge(dfm, taxonomy, by.x='asv', by.y='row.names', all.x=T)
+
+# Class 
+# Just those that have at least 5 observations / class
+nm.plus<-names(table(taxonomy$class)[which(table(taxonomy$class)>=5)])
+
+ggplot(dfm[which(dfm$class%in%nm.plus),], aes(x=class, y=value, fill=trt))+
+  geom_boxplot()+
+  theme_bw()+
+  facet_wrap(~trt, ncol=1)+
+  theme(axis.text.x = element_text(angle = 90, hjust=1))
+
+# Add number of observations per class on the graph
+table(taxonomy$class)
+
+# Family
+# Just those that have at least 5 observations / class
+nm.plus<-names(table(taxonomy$family)[which(table(taxonomy$family)>=5)])
+#nm.plus<-nm.plus[which(nm.plus%in%taxonomy$family[which(taxonomy$class=='Alphaproteobacteria')])]
+
+# Reorder levels by Class
+dfm2<-dfm[which(dfm$family%in%nm.plus),]
+dfm2$family<-factor(dfm2$family, levels=c("Acidobacteriaceae (Subgroup 1)", "Microbacteriaceae", "Micromonosporaceae", "Acetobacteraceae", "Beijerinckiaceae", "Sphingomonadaceae", "Hymenobacteraceae", "Burkholderiaceae", "Enterobacteriaceae", "Pseudomonadaceae"))
+
+ggplot(dfm2, aes(x=family, y=value, fill=trt))+
+  geom_boxplot()+
+  theme_bw()+
+  facet_wrap(~trt, ncol=1)+
+  theme(axis.text.x = element_text(angle = 90, hjust=1))
+
+# Add number of observations per family on the graph
+table(taxonomy$family)
+
+# B) At which phylogenetic scale are they structured?
+
+# Deal with negative edge lengths
+asvt3<-asvt2
+asvt3$edge.length[which(asvt3$edge.length<0)]<-0
+
+mic.cwm<-mica %*% as.matrix(plt.trt)
+mic.cwm<-mic.cwm[match(asvt2$tip.label,rownames(mic.cwm)),]
+mic.cwm<-apply(mic.cwm,2,sqrt)
+
+# Verify match between phylogeny and tip data
+plot(match(asvt3$tip.label,rownames(resum)))
+mic.cwm<-decostand(resum, 'standardize')
+
+p42<-phylobase::phylo4d(x = asvt3, tip.data = mic.cwm)
+
+par(mfrow=c(2,2))
+for (i in names(tdata(p42))){
+plt.trt.MoranCor4 <- phyloCorrelogram(p42, i, n.points = 100, ci.bs = 1000)
+# columns 1 and 4 in the res matrix are respectively axis x and y
+plot(plt.trt.MoranCor4, main=i)
+}
+
+```
+
+### Signal of microbial traits in plant phylogeny
+
+```{r}
+# At which phylogenetic scale are they structured
+bac.trt<-bac.10K.a
+bac.trt.sub<-bac.trt[,which(colnames(bac.trt)%in%unique(kk1$Kegg))]# Do it both with kk1 and kk2 [contrib at 0.005]
+bac.trt.sub<-sqrt(bac.trt.sub)
+bac.trt.sub<<-bac.trt.sub[match(plt.phy$tip.label,rownames(bac.trt.sub)),]
+
+p4<-phylobase::phylo4d(x = plt.phy, tip.data = bac.trt.sub) # [,which(colnames(bac.trt)%in%rownames(plt.pic[which(plt.pic$PIC.variance.P<0.05),]
+p4@order<-'preorder'
+
+# This object for extracting depth results
+# ** Not deterministic, results will change a bit from time to time
+res.list<-NULL
+
+par(mfrow=c(4,4))
+for (i in names(tdata(p4))){
+bac.trt.MoranCor <- phyloCorrelogram(p4, i, n.points = 25, ci.bs = 1000)
+# columns 1 and 4 in the res matrix are respectively axis x and y
+plot(bac.trt.MoranCor, main=i)
+fg<-as.data.frame(bac.trt.MoranCor$res)
+fg$trt<-i
+res.list<-rbind(res.list, fg)
+
+}
+
+```
+
+### Trait-trait correlations in both partners phylogenies
+
+```{r}
+# Test the combinations of plant and microbial traits
+
+# Bacterial traits
+bac.trt<-bac.10K.a
+bac.trt.sub<-bac.trt[,which(colnames(bac.trt)%in%c(unique(kk1$Kegg),unique(kk2$Kegg)))]#
+bac.trt.sub<-sqrt(bac.trt.sub)
+bac.trt.sub<<-bac.trt.sub[match(plt.phy$tip.label,rownames(bac.trt.sub)),]
+# Plant traits
+plt.trt.sd<-plt.trt.sd[match(plt.phy$tip.label,rownames(plt.trt.sd)),]
+
+# Join
+plt.mic<-cbind(plt.trt.sd,bac.trt.sub)
+
+# Associations while controlling for phylogenetic relationships
+pglsModel <- nlme::gls(K00174 ~ SLA + Ca + P + Wood.dens , plt.mic, correlation = corBrownian(phy=plt.phy), method = "ML") 
+summary(pglsModel)
+
+# Full model
+pglsModel.0 <- nlme::gls(K00174 ~ SLA + Ca + P + Wood.dens , plt.mic, method = "ML") # Check this for all traits that are important for explaining microbial betadiv / seems to have issues with trait values = 0 # + Ca + P + Wood.dens
+summary(pglsModel.0)
+
+# Comparing models
+anova(pglsModel.0,pglsModel)
+anova(pglsModel.0,pglsModel)$AIC[2]-anova(pglsModel.0,pglsModel)$AIC[1]#  delta AIC
+anova(pglsModel.0,pglsModel)$logLik[2]-anova(pglsModel.0,pglsModel)$logLik[1]# delta loglik
+
+lrtest(pglsModel.0, pglsModel)
+
+# For examination
+# Detected relationships between bacterial and plant traits
+plt.mic$Taxa<-metadata$Subclass[match(rownames(plt.mic),metadata$Species)]
+ggplot(plt.mic, aes(x=SLA, y=K00995))+
+  geom_point(aes(color=Taxa))+
+  geom_smooth(method='lm', se=F)+
+  geom_smooth(aes(group=Taxa, color=Taxa), method='lm', se=F)
+
+
+```
+
